@@ -299,7 +299,7 @@ namespace backend {
         jfieldID vid_field_id = java_env->GetFieldID(native_activity_clazz, "SDR_VID", "I");
         jfieldID pid_field_id = java_env->GetFieldID(native_activity_clazz, "SDR_PID", "I");
         
-        if (!vid_field_id || !vid_field_id || !pid_field_id)
+        if (!fd_field_id || !vid_field_id || !pid_field_id)
             return -1;
 
         int fd = java_env->GetIntField(app->activity->clazz, fd_field_id);
