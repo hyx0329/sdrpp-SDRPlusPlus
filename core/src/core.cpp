@@ -225,6 +225,8 @@ int sdrpp_main(int argc, char* argv[]) {
     // defConfig["moduleInstances"]["Scanner"] = "scanner";
     // TODO: Enable scanner when ready
 
+    defConfig["moduleInstances"]["MiriSDR Source"]["module"] = "mirisdr_source";
+    defConfig["moduleInstances"]["MiriSDR Source"]["enabled"] = true;
 
     // Themes
     defConfig["theme"] = "Dark";
