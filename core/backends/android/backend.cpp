@@ -280,47 +280,87 @@ namespace backend {
     }
 
     int getDeviceFD(int& vid, int& pid, const std::vector<DevVIDPID>& allowedVidPids) {
-        JavaVM* java_vm = app->activity->vm;
-        JNIEnv* java_env = NULL;
+        if (!app || !app->activity) return -1;
 
-        jint jni_return = java_vm->GetEnv((void**)&java_env, JNI_VERSION_1_6);
-        if (jni_return == JNI_ERR)
+        JavaVM* vm = app->activity->vm;
+        JNIEnv* env = nullptr;
+        bool attached_here = false;
+
+        jint rc = vm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6);
+        if (rc == JNI_EDETACHED) {
+            JavaVMAttachArgs args{JNI_VERSION_1_6, const_cast<char*>("getDeviceFD"), nullptr};
+            if (vm->AttachCurrentThread(&env, &args) != JNI_OK) return -1;
+            attached_here = true;
+        } else if (rc != JNI_OK) {
             return -1;
-
-        jni_return = java_vm->AttachCurrentThread(&java_env, NULL);
-        if (jni_return != JNI_OK)
-            return -1;
-
-        jclass native_activity_clazz = java_env->GetObjectClass(app->activity->clazz);
-        if (native_activity_clazz == NULL)
-            return -1;
-
-        jfieldID fd_field_id = java_env->GetFieldID(native_activity_clazz, "SDR_FD", "I");
-        jfieldID vid_field_id = java_env->GetFieldID(native_activity_clazz, "SDR_VID", "I");
-        jfieldID pid_field_id = java_env->GetFieldID(native_activity_clazz, "SDR_PID", "I");
-        
-        if (!fd_field_id || !vid_field_id || !pid_field_id)
-            return -1;
-
-        int fd = java_env->GetIntField(app->activity->clazz, fd_field_id);
-        vid = java_env->GetIntField(app->activity->clazz, vid_field_id);
-        pid = java_env->GetIntField(app->activity->clazz, pid_field_id);
-
-        jni_return = java_vm->DetachCurrentThread();
-        if (jni_return != JNI_OK)
-            return -1;
-
-        // If no vid/pid was given, just return successfully
-        if (allowedVidPids.empty()) {
-            return fd;
         }
 
-        // Otherwise, check that the vid/pid combo is allowed
+        struct DetachIfOwned {
+            JavaVM* vm; bool owned;
+            ~DetachIfOwned() { if (owned) vm->DetachCurrentThread(); }
+        } detach_guard{vm, attached_here};
+
+        struct LocalRef {
+            JNIEnv* env; jobject obj;
+            ~LocalRef() { if (obj) env->DeleteLocalRef(obj); }
+        } clazz_ref{env, nullptr};
+
+        jclass clazz = env->GetObjectClass(app->activity->clazz);
+        if (!clazz) return -1;
+        clazz_ref.obj = clazz;
+
+        if (!allowedVidPids.empty()) {
+            jmethodID open_id = env->GetMethodID(clazz, "openUsbDevice", "([I[I)I");
+            if (!open_id) { if (env->ExceptionCheck()) env->ExceptionClear(); return -1; }
+
+            jsize n = static_cast<jsize>(allowedVidPids.size());
+            jintArray vids = env->NewIntArray(n);
+            if (!vids) return -1;
+            jintArray pids = env->NewIntArray(n);
+            if (!pids) { env->DeleteLocalRef(vids); return -1; }
+
+            std::vector<jint> vbuf(n), pbuf(n);
+            for (jsize i = 0; i < n; ++i) {
+                vbuf[i] = static_cast<jint>(allowedVidPids[i].vid);
+                pbuf[i] = static_cast<jint>(allowedVidPids[i].pid);
+            }
+            env->SetIntArrayRegion(vids, 0, n, vbuf.data());
+            env->SetIntArrayRegion(pids, 0, n, pbuf.data());
+            if (env->ExceptionCheck()) {
+                env->DeleteLocalRef(vids);
+                env->DeleteLocalRef(pids);
+                return -1;
+            }
+
+            jint res = env->CallIntMethod(app->activity->clazz, open_id, vids, pids);
+            env->DeleteLocalRef(vids);
+            env->DeleteLocalRef(pids);
+
+            if (env->ExceptionCheck()) {
+                // TODO: log
+                env->ExceptionClear();
+                return -1;
+            }
+            if (res != 0) return -1;
+        }
+
+        jfieldID fd_field_id  = env->GetFieldID(clazz, "SDR_FD",  "I");
+        jfieldID vid_field_id = env->GetFieldID(clazz, "SDR_VID", "I");
+        jfieldID pid_field_id = env->GetFieldID(clazz, "SDR_PID", "I");
+        if (!fd_field_id || !vid_field_id || !pid_field_id) {
+            if (env->ExceptionCheck()) env->ExceptionClear();
+            return -1;
+        }
+
+        int fd = env->GetIntField(app->activity->clazz, fd_field_id);
+        vid = env->GetIntField(app->activity->clazz, vid_field_id);
+        pid = env->GetIntField(app->activity->clazz, pid_field_id);
+
+        if (allowedVidPids.empty()) return fd;
+
         for (auto const& vp : allowedVidPids) {
-            if (vp.vid != vid || vp.pid != pid) { continue; }
-            return fd;
+            if (vp.vid == vid && vp.pid == pid) return fd;
         }
-
         return -1;
     }
 

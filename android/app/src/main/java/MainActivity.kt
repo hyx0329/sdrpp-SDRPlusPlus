@@ -34,16 +34,15 @@ private val usbReceiver = object : BroadcastReceiver() {
                 var _this = context as MainActivity;
                 _this.SDR_device = intent.getParcelableExtra(UsbManager.EXTRA_DEVICE)
                 if (intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)) {
+                    // Close any previously opened connection before opening the new one
+                    try { _this.SDR_conn?.close() } catch (e: Exception) {}
                     _this.SDR_conn = _this.usbManager!!.openDevice(_this.SDR_device);
-                    
+
                     // Save SDR info
                     _this.SDR_VID = _this.SDR_device!!.getVendorId();
                     _this.SDR_PID = _this.SDR_device!!.getProductId()
                     _this.SDR_FD = _this.SDR_conn!!.getFileDescriptor();
                 }
-                
-                // Whatever the hell this does
-                context.unregisterReceiver(this);
 
                 // Hide again the system bars
                 _this.hideSystemBars();
@@ -71,6 +70,76 @@ class MainActivity : NativeActivity() {
         val decorView = getWindow().getDecorView();
         val uiOptions = View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY;
         decorView.setSystemUiVisibility(uiOptions);
+    }
+
+    // Re-enumerate USB devices and (re)open the one whose vid/pid matches the given
+    // lists. This is what makes the refresh button actually reflect the current USB
+    // state instead of returning a stale, cached file descriptor.
+    // Returns 0 if the device was opened, -1 otherwise.
+    public fun openUsbDevice(vids: IntArray, pids: IntArray): Int {
+        val usbMgr = usbManager
+        if (usbMgr == null) { return -1 }
+
+        val devList = usbMgr.getDeviceList()
+
+        // Find the first connected device whose vid/pid matches one of the allowed
+        // (vid, pid) pairs.
+        var matched: UsbDevice? = null
+        outer@ for ((name, dev) in devList) {
+            val v = dev.getVendorId()
+            val p = dev.getProductId()
+            for (i in vids.indices) {
+                if (vids[i] == v && pids[i] == p) {
+                    matched = dev
+                    break@outer
+                }
+            }
+        }
+
+        // No matching device is connected
+        if (matched == null) {
+            SDR_device = null
+            SDR_conn = null
+            SDR_VID = -1
+            SDR_PID = -1
+            SDR_FD = -1
+            return -1
+        }
+
+        // Device is connected and we already have permission: (re)open it for a fresh FD
+        if (usbMgr.hasPermission(matched)) {
+            try {
+                try { SDR_conn?.close() } catch (e: Exception) {}
+                SDR_device = matched
+                SDR_conn = usbMgr.openDevice(matched)
+                SDR_VID = matched.getVendorId()
+                SDR_PID = matched.getProductId()
+                SDR_FD = SDR_conn!!.getFileDescriptor()
+                return 0
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to open USB device", e)
+                SDR_device = null
+                SDR_conn = null
+                SDR_VID = -1
+                SDR_PID = -1
+                SDR_FD = -1
+                return -1
+            }
+        }
+
+        // Device is connected but permission has not been granted yet:
+        // reset state and ask for permission (on the UI thread). The device will be
+        // opened by the USB receiver when permission is granted, and the next refresh
+        // will pick it up.
+        SDR_device = null
+        SDR_conn = null
+        SDR_VID = -1
+        SDR_PID = -1
+        SDR_FD = -1
+        val dev = matched
+        val permissionIntent = PendingIntent.getBroadcast(this, 0, Intent(ACTION_USB_PERMISSION), 0)
+        runOnUiThread { usbMgr.requestPermission(dev, permissionIntent) }
+        return -1
     }
 
     public override fun onCreate(savedInstanceState: Bundle?) {
@@ -105,6 +174,12 @@ class MainActivity : NativeActivity() {
         // Hide bars again
         hideSystemBars();
         super.onResume();
+    }
+
+    public override fun onDestroy() {
+        // Unregister the USB permission receiver for the activity's lifetime
+        try { unregisterReceiver(usbReceiver) } catch (e: Exception) {}
+        super.onDestroy();
     }
 
     fun showSoftInput() {
